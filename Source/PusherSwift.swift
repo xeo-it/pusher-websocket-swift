@@ -552,45 +552,45 @@ public struct EventHandler {
     let callback: (AnyObject?) -> Void
 }
 
-public class PusherChannel {
-    public var eventHandlers: [String: [EventHandler]] = [:]
-    public var subscribed = false
-    public let name: String
-    public let connection: PusherConnection
-    public var unsentEvents = [String: AnyObject]()
+public protocol Channel {
+    var eventHandlers: [String: [EventHandler]] { get set }
+    var subscribed: Bool { get set }
+    var name: String { get }
+    var connection: PusherConnection { get }
+    var unsentEvents: [String: AnyObject] { get set }
+    
+//    init(name: String, connection: PusherConnection)
+}
 
-    public init(name: String, connection: PusherConnection) {
-        self.name = name
-        self.connection = connection
-    }
-
-    public func bind(eventName: String, callback: (AnyObject?) -> Void) -> String {
+public extension Channel {
+    
+    public mutating func bind(eventName: String, callback: (AnyObject?) -> Void) -> String {
         let randomId = NSUUID().UUIDString
         let eventHandler = EventHandler(id: randomId, callback: callback)
-        if self.eventHandlers[eventName] != nil {
-            self.eventHandlers[eventName]?.append(eventHandler)
+        if eventHandlers[eventName] != nil {
+            eventHandlers[eventName]?.append(eventHandler)
         } else {
-            self.eventHandlers[eventName] = [eventHandler]
+            eventHandlers[eventName] = [eventHandler]
         }
         return randomId
     }
-
-    public func unbind(eventName: String, callbackId: String) {
+    
+    public mutating func unbind(eventName: String, callbackId: String) {
         if let eventSpecificHandlers = self.eventHandlers[eventName] {
-            self.eventHandlers[eventName] = eventSpecificHandlers.filter({ $0.id != callbackId })
+            eventHandlers[eventName] = eventSpecificHandlers.filter({ $0.id != callbackId })
         }
     }
-
-    public func unbindAll() {
-        self.eventHandlers = [:]
+    
+    public mutating func unbindAll() {
+        eventHandlers = [:]
     }
-
-    public func unbindAllForEventName(eventName: String) {
-        self.eventHandlers[eventName] = []
+    
+    public mutating func unbindAllForEventName(eventName: String) {
+        eventHandlers[eventName] = []
     }
-
+    
     public func handleEvent(eventName: String, eventData: String) {
-        if let eventHandlerArray = self.eventHandlers[eventName] {
+        if let eventHandlerArray = eventHandlers[eventName] {
             if let _ = connection.options.attemptToReturnJSONObject {
                 for eventHandler in eventHandlerArray {
                     eventHandler.callback(connection.getEventDataJSONFromString(eventData))
@@ -602,25 +602,97 @@ public class PusherChannel {
             }
         }
     }
-
-    public func trigger(eventName: String, data: AnyObject) {
+    
+    public mutating func trigger(eventName: String, data: AnyObject) {
         if subscribed {
-            self.connection.sendEvent(eventName, data: data, channelName: self.name)
+            connection.sendEvent(eventName, data: data, channelName: name)
         } else {
             unsentEvents[eventName] = data
         }
     }
+    
 }
 
-public class PresencePusherChannel: PusherChannel {
-    public var members: [PresenceChannelMember]
+public struct PublicChannel: Channel {
+    public var name: String
+    public var connection: PusherConnection
+    public var unsentEvents: [String:AnyObject] = [:]
+    public var eventHandlers: [String:[EventHandler]] = [:]
+    public var subscribed = false
+    
+    public init(name: String, connection: PusherConnection) {
+        self.name = name
+        self.connection = connection
+    }
+}
 
-    override init(name: String, connection: PusherConnection) {
+public struct GlobalChannel: Channel {
+    public var name: String
+    public var connection: PusherConnection
+    public var unsentEvents: [String:AnyObject] = [:]
+    public var eventHandlers: [String:[EventHandler]] = [:]
+    public var subscribed = false
+    public var globalCallbacks: [String: (AnyObject?) -> Void] = [:]
+    
+    public init(connection: PusherConnection) {
+        self.name = "pusher_global_internal_channel"
+        self.connection = connection
+    }
+    
+    private func handleEvent(channelName: String, eventName: String, eventData: String) {
+        for (_, callback) in self.globalCallbacks {
+            callback(["channel": channelName, "event": eventName, "data": eventData])
+        }
+    }
+    
+    private mutating func bind(callback: (AnyObject?) -> Void) -> String {
+        let randomId = NSUUID().UUIDString
+        self.globalCallbacks[randomId] = callback
+        return randomId
+    }
+    
+    private mutating func unbind(callbackId: String) {
+        globalCallbacks.removeValueForKey(callbackId)
+    }
+    
+    public mutating func unbindAll() {
+        globalCallbacks = [:]
+    }
+    
+}
+
+public protocol AuthenticatedChannel {
+    
+}
+
+public struct PrivateChannel: Channel, AuthenticatedChannel {
+    public var name: String
+    public var connection: PusherConnection
+    public var unsentEvents: [String:AnyObject] = [:]
+    public var eventHandlers: [String:[EventHandler]] = [:]
+    public var subscribed = false
+    
+    public init(name: String, connection: PusherConnection) {
+        self.name = name
+        self.connection = connection
+    }
+}
+
+public struct PresenceChannel: Channel, AuthenticatedChannel {
+    public var name: String
+    public var connection: PusherConnection
+    public var unsentEvents: [String:AnyObject] = [:]
+    public var eventHandlers: [String:[EventHandler]] = [:]
+    public var subscribed = false
+    public var members: [PresenceChannelMember]
+    
+    public init(name: String, connection: PusherConnection) {
         self.members = []
-        super.init(name: name, connection: connection)
+        self.name = name
+        self.connection = connection
     }
 
-    private func addMember(memberJSON: Dictionary<String, AnyObject>) {
+    private mutating func addMember(memberJSON: Dictionary<String, AnyObject>) {
         if let userId = memberJSON["user_id"] as? String {
             if let userInfo = memberJSON["user_info"] as? PusherUserInfoObject {
                 members.append(PresenceChannelMember(userId: userId, userInfo: userInfo))
@@ -635,8 +707,8 @@ public class PresencePusherChannel: PusherChannel {
             }
         }
     }
-
-    private func addExistingMembers(memberHash: Dictionary<String, AnyObject>) {
+    
+    private mutating func addExistingMembers(memberHash: Dictionary<String, AnyObject>) {
         for (userId, userInfo) in memberHash {
             if let userInfo = userInfo as? PusherUserInfoObject {
                 self.members.append(PresenceChannelMember(userId: userId, userInfo: userInfo))
@@ -645,77 +717,52 @@ public class PresencePusherChannel: PusherChannel {
             }
         }
     }
-
-    private func removeMember(memberJSON: Dictionary<String, AnyObject>) {
+    
+    private mutating func removeMember(memberJSON: Dictionary<String, AnyObject>) {
         if let userId = memberJSON["user_id"] as? String {
             self.members = self.members.filter({ $0.userId != userId })
         } else if let userId = memberJSON["user_id"] as? Int {
             self.members = self.members.filter({ $0.userId != String(userId) })
         }
     }
+
 }
 
 public struct PresenceChannelMember {
     public let userId: String
     public let userInfo: AnyObject?
-
+    
     public init(userId: String, userInfo: AnyObject? = nil) {
         self.userId = userId
         self.userInfo = userInfo
     }
 }
 
-public class GlobalChannel: PusherChannel {
-    public var globalCallbacks: [String: (AnyObject?) -> Void] = [:]
-
-    init(connection: PusherConnection) {
-        super.init(name: "pusher_global_internal_channel", connection: connection)
-    }
-
-    private func handleEvent(channelName: String, eventName: String, eventData: String) {
-        for (_, callback) in self.globalCallbacks {
-            callback(["channel": channelName, "event": eventName, "data": eventData])
-        }
-    }
-
-    private func bind(callback: (AnyObject?) -> Void) -> String {
-        let randomId = NSUUID().UUIDString
-        self.globalCallbacks[randomId] = callback
-        return randomId
-    }
-
-    private func unbind(callbackId: String) {
-        globalCallbacks.removeValueForKey(callbackId)
-    }
-
-    override public func unbindAll() {
-        globalCallbacks = [:]
-    }
-}
-
-public class PusherChannels {
-    public var channels = [String: PusherChannel]()
-
-    private func add(channelName: String, connection: PusherConnection) -> PusherChannel {
+public struct PusherChannels {
+    public var channels = [String: Channel]()
+    
+    private mutating func add(channelName: String, connection: PusherConnection) -> Channel {
         if let channel = self.channels[channelName] {
             return channel
         } else {
-            var newChannel: PusherChannel
+            var newChannel: Channel
             if isPresenceChannel(channelName) {
-                newChannel = PresencePusherChannel(name: channelName, connection: connection)
+                newChannel = PresenceChannel(name: channelName, connection: connection)
             } else {
-                newChannel = PusherChannel(name: channelName, connection: connection)
+                newChannel = PublicChannel(name: channelName, connection: connection)
             }
+            
+            // TODO: Add in logic for PrivateChannel
             self.channels[channelName] = newChannel
             return newChannel
         }
     }
-
-    private func remove(channelName: String) {
+    
+    private mutating func remove(channelName: String) {
         self.channels.removeValueForKey(channelName)
     }
-
-    private func find(channelName: String) -> PusherChannel? {
+    
+    private func find(channelName: String) -> Channel? {
         return self.channels[channelName]
     }
 }
